@@ -1,0 +1,40 @@
+;xfpl_log.def
+
+structure process
+	jobno		,a8
+			,a1
+	pid		,a10
+			,a1
+	login		,a20
+			,a1
+	logout		,a20
+			,a1
+	lastcall	,a20
+
+structure pdetail
+	jobno		,a8
+			,a1
+	pid		,a10
+			,a1
+	methodid	,a30
+			,a1
+	called		,a20
+
+common
+	envrn		,d2
+	verbose		,d1
+
+.align
+record lbuff
+			,a BUFF_SIZE
+	lb78		,a78 @ lbuff
+
+record ,x
+	ljobno		,a8
+	group lbuf	,a
+			,a2
+	lb		,a50
+	endgroup
+
+
+

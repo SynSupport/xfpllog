@@ -1,0 +1,626 @@
+;;.define TEST_MODE '0' ;this option is used to assist debugging
+
+.define BUFF_SIZE 20000 ;maximum xfServerPlus log file record length
+
+
+;;.define GETS_MODE 1 ;if not defined will use READS to read log file
+;
+; GETS_MODE can be enabled if the xfServerPlus packet strings contain
+; CR/LF/FF/EOF characters causing spurious READS records.
+; NOTE: GETS_MODE is much slower, but should deal with very long records
+
+.main
+.include 'INC:xfpl_log.def'
+external function
+    mainprog    ,i
+record
+    stopStatus  ,i4
+proc
+.ifdef DBLv9
+    try
+        stopStatus = %mainprog()
+    catch (excp ,@Exception)
+    begin
+        data ttCh ,i4, %syn_freechn()
+        open(ttCh, O, 'TT:')
+        writes(ttCh, excp.Message)
+        writes(ttCh, excp.StackTrace)
+        close ttCh
+.ifdef DBLNET
+        StopMessage()
+.endc ;DBLNET
+        stopStatus = D_EXIT_FAILURE
+    end
+    endtry
+.else ;DBLv9
+    stopStatus = %mainprog()
+.endc ;DBLv9
+    xcall flags(7000000, 1)
+    stop stopStatus
+end
+
+;;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+function mainprog ,i
+
+.include 'WND:tools.def'
+.include 'WND:windows.def'
+
+.include 'INC:xfpl_log.def'
+
+.ifndef DBLv75
+    external function
+        syn_freechn ,^val
+.endc
+
+    external function
+        get_process ,^val
+        get_pdetail ,^val
+        u_cmdlinopt ,^val
+
+.align
+    record clr
+        job_no      ,a8         ;jobno
+        filename    ,a255       ;log filename
+        outfile     ,a255       ;output filename
+        option      ,a20        ;option
+        max_time    ,a20        ;maximum xfpl count date/time
+
+.align
+    record clr_i
+        ctr         ,i4         ;counter
+        p_hdl       ,D_HANDLE   ;memory array handle
+        p_count     ,i4         ;memory array counter
+        chan        ,i4         ;output channel
+        max_xfpl    ,i4         ;maximum xfpl count
+
+.proc
+    clear clr, ^i(clr_i)
+
+    xcall flags(7000000, 1)
+
+    xcall envrn(envrn)
+
+    xcall u_start
+
+.ifndef DBLNET
+    xcall w_caption(WC_SET, "XFPL_LOG")
+.endc ;DBLNET
+
+    if(%u_cmdlinopt('?', 1, filename, ctr).or.
+&      %u_cmdlinopt('h', 1, filename, ctr))
+    begin
+        call show_options
+        if(envrn.gt.10)
+        begin
+            xcall u_message("Help displayed")
+        end
+        freturn D_EXIT_SUCCESS
+    end
+
+    if(.not.%u_cmdlinopt('l', 1, filename, ctr))
+    begin
+.ifdef TEST_MODE
+        filename = 'DBLDIR:xfpl.log'
+        ctr = %trim(filename)
+.else
+        xcall getlog('XFPL_LOGFILE', filename, ctr)
+.endc
+        if(filename.and.ctr)
+        begin
+            chan = %syn_freechn
+            open(chan, I, filename(1:ctr)) [ERR=nofile]
+            close chan
+            if(FALSE)
+            begin
+nofile,
+                clear filename
+            end
+        end
+    end
+
+    if(.not.%u_cmdlinopt('f', 1, outfile, ctr))
+    begin
+.ifdef TEST_MODE
+        if(filename) then
+            outfile = filename(1:%trim(filename)) + '_audit'
+        else
+            outfile = 'TT:'
+.else
+        outfile = 'TT:'
+.endc
+    end
+
+    if(.not.%u_cmdlinopt('v', 1, option, ctr)) then
+    begin
+.ifdef TEST_MODE
+        verbose = 1
+.else
+        clear verbose
+.endc
+    end
+    else
+    begin
+        onerror not_number
+        verbose = option
+        if(FALSE)
+        begin
+not_number,
+            call show_options
+            xcall u_message("Invalid -v option ["+option(1:%trim(option))+"]")
+            freturn D_EXIT_FAILURE
+        end
+        offerror
+    end
+
+    ; must be LAST command line option
+    if(.not.%u_cmdlinopt('o', 1, option, ctr))
+    begin
+.ifdef TEST_MODE
+        option = TEST_MODE
+.else
+        option = '0'
+.endc
+    end
+
+    if(.not.outfile)
+    begin
+        call show_options
+        xcall u_message("No '-f outfilename' option")
+        freturn D_EXIT_FAILURE
+    end
+
+    if(.not.filename)
+    begin
+        call show_options
+        xcall u_message("No '-l logfilename' option")
+        freturn D_EXIT_FAILURE
+    end
+
+    using option select
+    ('0'),
+    begin
+.ifndef DBLNET
+        xcall w_caption(WC_SET, "Getting Process Count")
+.endc ;DBLNET
+
+        xcall get_process(filename, p_hdl, max_xfpl, max_time)
+
+        xcall u_message("Maximum concurrent sessions = "+%string(max_xfpl)+" "+%atrim(max_time))
+    end
+    ('1'),
+    begin
+.ifndef DBLNET
+        xcall w_caption(WC_SET, "Getting Process List")
+.endc ;DBLNET
+
+        if(p_count = %get_process(filename, p_hdl, max_xfpl, max_time))
+        begin
+            if(option.eq.'1')
+            begin
+                chan = %syn_freechn()
+                open(chan, o, outfile)
+                writes(chan, "Max xfpl count="+%string(max_xfpl,'ZZZX')+" "+max_time)
+                for ctr from 1 thru p_count
+                begin
+                    writes(chan, ^m(process[ctr], p_hdl))
+                end
+                close chan
+            end
+        end
+
+        xcall u_message(%string(p_count)+" processes\n"+
+&           "Maximum concurrent sessions = "+%string(max_xfpl)+" "+%atrim(max_time))
+    end
+    ('2'),
+    begin
+.ifndef DBLNET
+        xcall w_caption(WC_SET, "Getting Process Details")
+.endc ;DBLNET
+
+        if(.not.%u_cmdlinopt('p', 1, job_no, ctr))
+        begin
+.ifdef TEST_MODE
+            job_no = '00000000'
+.endc
+        end
+
+        if(.not.job_no)
+        begin
+            call show_options
+            xcall u_message("No '-p processid' option")
+            freturn D_EXIT_FAILURE
+        end
+
+.ifndef DBLNET
+        xcall w_caption(WC_SET, "Getting Process ["+job_no+"] Details")
+.endc ;DBLNET
+
+        if(p_count = %get_pdetail(filename, job_no, p_hdl))
+        begin
+            chan = %syn_freechn()
+            open(chan, o, outfile)
+            for ctr from 1 thru p_count
+            begin
+                writes(chan, ^m(pdetail[ctr], p_hdl))
+            end
+            close chan
+        end
+
+        xcall u_message(%string(p_count)+" process detail entries")
+    end
+    (),
+    begin
+        call show_options
+        xcall u_message("Invalid -o option ["+option(1:%trim(option))+"]")
+    end
+    endusing
+
+    xcall u_finish
+    freturn D_EXIT_SUCCESS
+
+show_options,
+
+    writes(g_terminal, " ")
+    writes(g_terminal, "dbr xfpl_log -l logfile -f outfile -o option -v verbose [-p pid] -h help")
+    writes(g_terminal, " ")
+    writes(g_terminal, " option '0' = get maximum concurrent usage")
+    writes(g_terminal, " option '1' = get process login, logout and last method call times")
+    writes(g_terminal, " option '2' = get method call times for single pid (requires -p)")
+    writes(g_terminal, " ")
+    writes(g_terminal, " verbose '0' = no logging")
+    writes(g_terminal, " verbose '1' = display records read count")
+    writes(g_terminal, " ")
+
+    return
+
+.end
+
+;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+.function get_process ,^val
+    a_filename  ,a
+    a_hdl       ,n
+    a_max_xfpl  ,n
+    a_max_time  ,a
+
+.ifndef DBLv75
+    external function
+        syn_freechn ,^val
+.endc
+
+    external function
+        read_next_buff  ,^val
+
+.include 'WND:tools.def'
+
+.include 'INC:xfpl_log.def'
+
+.align
+    record clr_i
+        count       ,i4         ;jobno array count (max)
+        found       ,i4         ;jobno found in array
+        chan        ,i4         ;input channel
+        ctr         ,i4         ;counter
+        pos         ,i4         ;position in string
+        max_xfpl    ,i4         ;maximum xfpl user count
+        cur_xfpl    ,i4         ;currnt xfpl user count
+
+.align
+    record clr
+        last_jobno  ,a8         ;last jobno
+        last_pid    ,a10        ;last PID code
+        max_time    ,a20        ;maximum xfpl user date/time
+
+.proc
+
+    clear clr, ^i(clr_i)
+
+    chan = %syn_freechn()
+
+    open(chan, I, a_filename)
+
+    while(.not.%read_next_buff(chan, lbuff))
+    begin
+        clear found
+
+        call find_jobno
+
+        if(.not.found)
+        begin
+            onerror bad_hex
+            last_pid = ^x(ljobno)
+            if(false)
+            begin
+bad_hex,
+                offerror
+                nextloop
+            end
+            offerror
+
+
+            if(count) then
+            begin
+                count += 1
+                a_hdl = %mem_proc(DM_RESIZ, count*^size(process), a_hdl)
+            end
+            else
+            begin
+                count = 1
+                a_hdl = %mem_proc(DM_ALLOC+DM_STATIC, ^size(process))
+            end
+
+            clear ^m(process[count], a_hdl)
+            ^m(process[count].jobno, a_hdl) = ljobno
+            ^m(process[count].pid, a_hdl) = ^x(ljobno)
+
+            found = count
+        end
+
+        if(lb.eq."xfserverplusremotesession")
+        begin
+;00000000: xfServerPlusRemoteSession 7.5.1 started: DD-MMM-YYYY HH:MM:SS
+            if(pos = %instr(1, lb, "started: "))
+            begin
+                ^m(process[found].login,a_hdl) = lb(pos+9:20)
+                cur_xfpl += 1
+                if(cur_xfpl.gt.max_xfpl)
+                begin
+                    max_xfpl = cur_xfpl
+                    max_time = lb(pos+9:20)
+                end
+            end
+;00000000: xfServerPlusRemoteSession 7.5.1 stopped: DD-MMM-YYYY HH:MM:SS
+            if(pos = %instr(1, lb, "stopped: "))
+            begin
+                ^m(process[found].logout,a_hdl) = lb(pos+9:20)
+                if(cur_xfpl.gt.0)
+                    cur_xfpl -= 1
+            end
+        end
+
+;00000000: Function methodname called at DD-MMM-YYYY HH:MM:SS
+;00000000: Function methodname returned at DD-MMM-YYYY HH:MM:SS
+        if(lb.eq."function")
+        begin
+            pos = %instr(1, lb, "called at ")
+            if(pos)
+            begin
+                ^m(process[found].lastcall,a_hdl) = lb(pos+10:20)
+            end
+        end
+    end
+
+    close chan
+
+    a_max_xfpl = max_xfpl
+    a_max_time = max_time
+    freturn count
+
+find_jobno,
+
+    for ctr from 1 thru count
+    begin
+        if(^m(process[ctr].jobno, a_hdl) .eq. ljobno)
+        begin
+            found = ctr
+            ctr = count
+        end
+    end
+    return
+
+.end
+
+;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+.function get_pdetail ,^val
+    a_filename  ,a
+    a_jobno     ,a
+    a_hdl       ,n
+
+.ifndef DBLv75
+    external function
+        syn_freechn ,^val
+.endc
+
+    external function
+        read_next_buff  ,^val
+
+.include 'INC:xfpl_log.def'
+
+.align
+    record clr_i
+        count       ,i4     ;counter
+        chan        ,i4     ;input channel
+        pos         ,i4     ;position in string
+
+.align
+    record clr
+        last_jobno  ,a8     ;last jobno
+
+.proc
+
+    clear clr, ^i(clr_i)
+
+    last_jobno = a_jobno
+    locase last_jobno
+
+    chan = %syn_freechn()
+
+    open(chan, I, a_filename)
+
+    while(.not.%read_next_buff(chan, lbuff))
+    begin
+        if(ljobno.eq.last_jobno)
+        begin
+            if(lb.eq."xfserverplusremotesession")
+            begin
+                if(pos = %instr(1, lb, "started: "))
+                begin
+                    call add_entry
+                    ^m(pdetail[count].methodid,a_hdl) = 'connect()'
+                    ^m(pdetail[count].called,a_hdl) = lb(pos+9:20)
+                end
+                if(pos = %instr(1, lb, "stopped: "))
+                begin
+                    call add_entry
+                    ^m(pdetail[count].methodid,a_hdl) = 'disconnect()'
+                    ^m(pdetail[count].called,a_hdl) = lb(pos+9:20)
+                end
+            end
+
+            if(lb.eq."function")
+            begin
+                if(pos = %instr(1, lb, "called at "))
+                begin
+                    call add_entry
+                    ^m(pdetail[count].methodid,a_hdl) = lb(10, pos-2)
+                    ^m(pdetail[count].called,a_hdl) = lb(pos+10:20)
+                end
+            end
+        end
+    end
+
+    close chan
+
+    freturn count
+
+add_entry,
+
+    if(count) then
+    begin
+        count += 1
+        a_hdl = %mem_proc(DM_RESIZ, count*^size(process), a_hdl)
+    end
+    else
+    begin
+        count = 1
+        a_hdl = %mem_proc(DM_ALLOC+DM_STATIC, ^size(process))
+    end
+
+    clear ^m(pdetail[count],a_hdl)
+
+    ^m(process[count].jobno,a_hdl) = ljobno
+
+    onerror bad_hex
+    ^m(process[count].pid,a_hdl) = ^x(ljobno)
+bad_hex,
+    offerror
+
+    return
+
+.end
+
+;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+.function read_next_buff ,^val
+    a_chan      ,n
+    a_buff      ,a
+
+.include 'INC:xfpl_log.def'
+
+.align
+    record clr_i
+        ptr         ,i8             ;position in buffer
+        fstatus     ,i4             ;function return status
+
+.align
+    record clr
+        buff        ,a BUFF_SIZE    ;input buffer
+        char        ,a1             ;current character
+
+    static record counter
+        rec_num     ,d8             ;record number
+        ten_rec     ,d1 @rec_num+7
+
+.proc
+
+    clear clr, ^i(clr_i)
+
+.ifdef GETS_MODE
+
+    while(ptr.lt.BUFF_SIZE)
+    begin
+        gets(a_chan, char, eof)
+        using envrn select
+        (6),    ;VMS
+        begin
+            if (char.eq.%char(13).or.char.eq.%char(10))
+                exitloop
+        end
+        (8),    ;UNIX
+        begin
+            if (char.eq.%char(10))
+                exitloop
+        end
+        (), ;Windows
+        begin
+            if (char.eq.%char(13).or.char.eq.%char(10))
+                exitloop
+        end
+        endusing
+
+        ptr += 1
+        if(char.lt.' ')
+            char = '.'
+        buff(ptr:1) = char
+    end
+
+.else
+
+    reads(a_chan, buff, eof)
+
+.endc
+
+exit,
+    if(verbose)
+    begin
+        rec_num += 1
+        if(ten_rec.eq.0)
+        begin
+            xcall e_sect(counter, D_INFO, D_CLEAR, D_LEFT)
+            xcall u_update
+        end
+    end
+
+    locase buff
+    a_buff = buff
+
+    freturn fstatus
+
+eof,
+    fstatus = %error
+
+    if(verbose)
+    begin
+        xcall e_sect(counter, D_INFO, D_CLEAR, D_LEFT)
+        xcall u_update
+    end
+
+    goto exit
+
+.end
+
+;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+.ifndef DBLv75
+
+.function syn_freechn ,^val
+
+.align
+    record clr_i
+        chan        ,i4
+
+.proc
+
+    chan = 1
+    while(chan.lt.255.and.%chopen(chan))
+        chan += 1
+
+    freturn chan
+.end
+
+.endc ;DBLv75
+
+;++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
